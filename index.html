@@ -1,5 +1,6 @@
 # hinagatasan
 民事信託契約書雛形生成ツール
+
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -96,6 +97,11 @@
   .send-btn { background: var(--gold); color: white; border: none; padding: 9px 18px; font-family: 'Noto Sans JP', sans-serif; font-size: 13px; cursor: pointer; border-radius: 1px; transition: background 0.15s; white-space: nowrap; height: 38px; }
   .send-btn:hover { background: var(--ink); }
   .send-btn:disabled { background: var(--light); cursor: not-allowed; }
+  .back-btn { background: none; border: 1px solid var(--border); padding: 9px 12px; font-family: 'Noto Sans JP', sans-serif; font-size: 12px; color: var(--mid); cursor: pointer; border-radius: 1px; transition: all 0.15s; white-space: nowrap; height: 38px; }
+  .back-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .back-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .restore-bar { background: var(--gold); color: white; padding: 8px 20px; font-size: 12px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  .restore-btn { background: white; color: var(--gold); border: none; padding: 4px 12px; font-size: 11px; cursor: pointer; border-radius: 1px; font-family: 'Noto Sans JP', sans-serif; font-weight: 500; }
 
   /* Document Panel */
   .doc-panel { width: 440px; flex-shrink: 0; display: flex; flex-direction: column; background: #fefcf8; }
@@ -153,12 +159,14 @@
 
 <div class="layout">
   <div class="chat-panel">
+    <div id="restoreBar" style="display:none" class="restore-bar"><span id="restoreMsg"></span><button class="restore-btn" onclick="restoreSession()">復元する</button><button class="restore-btn" onclick="dismissRestore()" style="background:transparent;color:white;border:1px solid white">無視</button></div>
     <div class="progress-wrap">
       <div class="progress-label" id="progressLabel">0 / 31 問</div>
       <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
     </div>
     <div class="messages" id="messages"></div>
     <div class="input-area">
+      <button class="back-btn" id="backBtn" onclick="goBack()" disabled>◀ 戻る</button>
       <textarea id="userInput" placeholder="選択肢をクリックするか、直接入力してください" rows="1"
         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"
         oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
@@ -255,6 +263,80 @@ const state = {
   isLoading: false,
   activeTab: 'contract'
 };
+
+const STORAGE_KEY = 'hinagatasan_session';
+
+// ローカルストレージ保存
+function saveSession() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    answers: state.answers,
+    currentIndex: state.currentIndex,
+    savedAt: new Date().toISOString()
+  }));
+}
+
+// ローカルストレージ読込
+function loadSession() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (data && data.currentIndex > 0) return data;
+  } catch(e) {}
+  return null;
+}
+
+// セッション復元
+function restoreSession() {
+  const data = loadSession();
+  if (!data) return;
+  state.answers = data.answers;
+  state.currentIndex = data.currentIndex;
+  document.getElementById('restoreBar').style.display = 'none';
+  updateDisplay();
+  updateBackBtn();
+  // 復元後の質問を表示
+  if (state.currentIndex < TOTAL_Q) {
+    askNext();
+  } else {
+    finalize();
+  }
+}
+
+function dismissRestore() {
+  localStorage.removeItem(STORAGE_KEY);
+  document.getElementById('restoreBar').style.display = 'none';
+}
+
+// 前の質問に戻る
+function goBack() {
+  if (state.currentIndex <= 0 || state.isLoading) return;
+
+  // 最後の質問の回答を削除
+  state.currentIndex--;
+  const lastQ = Q_ORDER[state.currentIndex];
+  delete state.answers[lastQ];
+  saveSession();
+  updateDisplay();
+  updateBackBtn();
+
+  // メッセージを2つ削除（質問と回答）
+  const messages = document.getElementById('messages');
+  const msgs = messages.querySelectorAll('.msg');
+  let removed = 0;
+  for (let i = msgs.length - 1; i >= 0 && removed < 2; i--) {
+    msgs[i].remove();
+    removed++;
+  }
+
+  // 削除した質問を再表示
+  const qNo = Q_ORDER[state.currentIndex];
+  const qData = QUESTIONS[qNo];
+  addMessage('ai', `**${qData.q}**（選び直してください）`, qData.choices);
+}
+
+function updateBackBtn() {
+  const btn = document.getElementById('backBtn');
+  if (btn) btn.disabled = state.currentIndex <= 0;
+}
 
 // ============================================================
 // 条件フラグ判定（10個）
@@ -396,9 +478,14 @@ function generateContract() {
   // 信託期間
   let periodBody = `本件信託の存続期間は、効力発生日から`;
   if (f.isContinuous) {
-    periodBody += '受益者死亡日の翌日（受益者が複数の法定相続人を持つ場合は遺産分割が成立した日の翌日）まで';
+    // 受益者連続型：受益者死亡日の翌日のみ
+    periodBody += '受益者死亡日の翌日まで';
+  } else if (a[4] && a[4].includes('相続型')) {
+    // 受益権相続型（遺産分割）：死亡翌日、ただし相続人複数かつ遺言指定なしの場合は遺産分割成立日の翌日
+    periodBody += '受益者死亡日の翌日。ただし、受益者が遺言により本件信託の受益権の全部の承継先を指定していない場合であって、かつ、当該時点において当初受益者の法定相続人（包括受遺者を含む。）が複数存する場合には、その全員による本件信託の受益権の全部についての遺産分割が成立した日の翌日まで';
   } else {
-    periodBody += a[13] && a[13].includes('年数') ? '●年間' : '●年●月●日';
+    // 承継予定なし・特定承継型：個別記載
+    periodBody += a[13] && a[13].includes('年数') ? '●年間' : '●年●月●日まで';
   }
   periodBody += `とする。ただし、期間満了の●か月前までに受益者または受益者代理人と受託者の合意（${supervisorNote}）があれば、これを延長することができる。`;
   if (f.hasLoan) periodBody += loanConsentNote;
@@ -408,7 +495,13 @@ function generateContract() {
   let termBody = '信託期間の定めにかかわらず本件信託は、次に掲げる各号の事由が生じた時に終了する。\n（１）受託者が、天変地異等相当の事由により信託の目的の達成が不可能または著しく困難になったと認めたとき\n（２）受託者が、信託財産から信託事務処理に必要な費用の支払いができず、かつその費用の支払いを受益者から受けられないとき\n（３）信託財産が消滅したとき\n（４）受託者について債務不履行その他これに準じる信用の不安が発生した場合で、受益者が受託者に対して終了の意思表示をしたとき';
   if (f.hasLoan) termBody += '\n（５）信託事務に係る借入について期限の利益を喪失したとき';
   termBody += `\n（${f.hasLoan ? '６' : '５'}）受益者と受託者の合意があったとき`;
-  if (f.isContinuous) termBody += `\n（${f.hasLoan ? '７' : '６'}）受益者が死亡したとき`;
+  if (f.isContinuous) {
+    // 受益者連続型：受益者死亡で終了
+    termBody += `\n（${f.hasLoan ? '７' : '６'}）受益者が死亡したとき`;
+  } else if (a[4] && a[4].includes('相続型')) {
+    // 受益権相続型：遺産分割成立で終了
+    termBody += `\n（${f.hasLoan ? '７' : '６'}）受益者が死亡し、かつ本件信託の受益権の全部についての遺産分割が成立したとき（受益者が遺言により受益権の全部の承継先を指定した場合は、受益者が死亡したとき）`;
+  }
   addArt('信託終了事由', termBody);
 
   // 信託事務の内容
@@ -747,8 +840,9 @@ async function processAnswer(answer) {
   const currentQ = Q_ORDER[state.currentIndex];
   state.answers[currentQ] = answer;
   updateDisplay();
-
   state.currentIndex++;
+  saveSession();
+  updateBackBtn();
 
   if (state.currentIndex >= TOTAL_Q) {
     await finalize();
@@ -820,8 +914,29 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // 起動
 // ============================================================
 async function init() {
+  // 保存セッションの確認
+  const saved = loadSession();
+  if (saved) {
+    const savedAt = new Date(saved.savedAt).toLocaleString('ja-JP');
+    document.getElementById('restoreMsg').textContent = `前回の入力（${savedAt}）を復元しますか？`;
+    document.getElementById('restoreBar').style.display = 'flex';
+    await sleep(300);
+    addMessage('ai', '民事信託契約書の雛形生成システムへようこそ。
+
+前回の入力データが見つかりました。上のバーから復元できます。
+
+新しく始める場合は「無視」をクリックしてください。');
+    await sleep(600);
+    addMessage('ai', `**${QUESTIONS[1].q}**`, QUESTIONS[1].choices);
+    return;
+  }
+
   await sleep(300);
-  addMessage('ai', '民事信託契約書の雛形生成システムへようこそ。\n\n**31問**にお答えいただくことで、お客様の状況に合った民事信託契約書を自動生成します。条件付き文言の挿入・削除も自動で行います。\n\nそれではまず基本構造から確認します。');
+  addMessage('ai', '民事信託契約書の雛形生成システムへようこそ。
+
+**31問**にお答えいただくことで、お客様の状況に合った民事信託契約書を自動生成します。条件付き文言の挿入・削除も自動で行います。
+
+それではまず基本構造から確認します。');
   await sleep(600);
   addMessage('ai', `**${QUESTIONS[1].q}**`, QUESTIONS[1].choices);
 }
